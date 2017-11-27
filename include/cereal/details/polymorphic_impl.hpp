@@ -56,6 +56,14 @@
 #include <set>
 #include <stack>
 
+//! Helper macro to omit unused warning
+#if defined(__GNUC__)
+  // GCC / clang don't want the function
+  #define CEREAL_BIND_TO_ARCHIVES_UNUSED_FUNCTION
+#else
+  #define CEREAL_BIND_TO_ARCHIVES_UNUSED_FUNCTION static void unused() { (void)b; }
+#endif
+
 //! Binds a polymorhic type to all registered archives
 /*! This binds a polymorphic type to all compatible registered archives that
     have been registered with CEREAL_REGISTER_ARCHIVE.  This must be called
@@ -67,7 +75,7 @@
     template<>                                                           \
     struct init_binding<__VA_ARGS__> {                                   \
         static bind_to_archives<__VA_ARGS__> const & b;                  \
-        static void unused() { (void)b; }                                \
+        CEREAL_BIND_TO_ARCHIVES_UNUSED_FUNCTION                          \
     };                                                                   \
     bind_to_archives<__VA_ARGS__> const & init_binding<__VA_ARGS__>::b = \
         ::cereal::detail::StaticObject<                                  \
@@ -180,8 +188,8 @@ namespace cereal
       {
         auto const & mapping = lookup( baseInfo, typeid(Derived), [&](){ UNREGISTERED_POLYMORPHIC_CAST_EXCEPTION(save) } );
 
-        for( auto const * map : mapping )
-          dptr = map->downcast( dptr );
+        for( auto const * dmap : mapping )
+          dptr = dmap->downcast( dptr );
 
         return static_cast<Derived const *>( dptr );
       }
@@ -273,7 +281,7 @@ namespace cereal
               return {path.size(), path};
             }
             else
-              return {std::numeric_limits<size_t>::max(), {}};
+              return {(std::numeric_limits<size_t>::max)(), {}};
           };
 
           std::stack<std::type_index>         parentStack;      // Holds the parent nodes to be processed

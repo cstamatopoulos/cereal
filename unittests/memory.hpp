@@ -28,6 +28,8 @@
 #define CEREAL_TEST_MEMORY_H_
 #include "common.hpp"
 
+#include "cereal/observer_ptr.h"
+
 template <class IArchive, class OArchive> inline
 void test_memory()
 {
@@ -143,6 +145,31 @@ void test_default_construction()
   }
   CHECK_EQ(o_ptr->x, i_ptr->x);
   CHECK_EQ(o_ptr2->x, i_ptr2->x);
+}
+
+template <class IArchive, class OArchive> inline
+void test_default_construction2()
+{
+	auto o_ptr = std::make_unique<TestClass>(1);
+	nonstd::observer_ptr<TestClass> o_ptr_obs = nonstd::make_observer(o_ptr.get());
+	
+	std::unique_ptr<TestClass> i_ptr;
+	nonstd::observer_ptr<TestClass> i_ptr_obs;
+
+	std::ostringstream os;
+	{
+		OArchive oar(os);
+		oar(o_ptr);
+		oar(o_ptr_obs);
+	}
+	{
+		std::istringstream is(os.str());
+		IArchive iar(is);
+		iar(i_ptr);
+		iar(i_ptr_obs);
+	}
+	CHECK_EQ(o_ptr->x, i_ptr->x);
+	CHECK_EQ(i_ptr.get(), i_ptr_obs.get());
 }
 
 #endif // CEREAL_TEST_LOAD_CONSTRUCT_H_

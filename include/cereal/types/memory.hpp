@@ -32,6 +32,7 @@
 
 #include "cereal/cereal.hpp"
 #include <memory>
+#include "cereal/observer_ptr.h"
 #include <cstring>
 
 // Work around MSVC not having alignof
@@ -254,6 +255,39 @@ namespace cereal
     ar( CEREAL_NVP_("ptr_wrapper", memory_detail::make_ptr_wrapper( ptr )) );
   }
 
+  struct nop
+  {
+    template <typename T>
+    void operator() (T const &) const noexcept { }
+  };
+  
+  //! Saving std::observer_ptr for non polymorphic types
+  template <class Archive, class T> inline
+  typename std::enable_if<!std::is_polymorphic<T>::value, void>::type
+  CEREAL_SAVE_FUNCTION_NAME( Archive & ar, nonstd::observer_ptr<T> const & ptr )
+  {
+#if _DEBUG
+    ar( CEREAL_NVP_("ptr_wrapper", memory_detail::make_ptr_wrapper( ptr )) );
+#else
+    const auto uptr = std::unique_ptr<T, nop>(ptr.get());
+    ar( CEREAL_NVP_("ptr_wrapper", memory_detail::make_ptr_wrapper( uptr )) );
+#endif
+  }
+
+  //! Loading std::observer_ptr, case when no user load and construct for non polymorphic types
+  template <class Archive, class T> inline
+  typename std::enable_if<!std::is_polymorphic<T>::value, void>::type
+  CEREAL_LOAD_FUNCTION_NAME(Archive & ar, nonstd::observer_ptr<T> & ptr)
+  {
+#if _DEBUG
+    ar( CEREAL_NVP_("ptr_wrapper", memory_detail::make_ptr_wrapper( ptr )) );
+#else
+    std::unique_ptr<T, nop> uptr;
+    ar(CEREAL_NVP_("ptr_wrapper", memory_detail::make_ptr_wrapper(uptr)));
+    ptr.reset(reinterpret_cast<T *>(uptr.get()));
+#endif
+  }
+
   // ######################################################################
   // Pointer wrapper implementations follow below
 
@@ -348,18 +382,17 @@ namespace cereal
   void CEREAL_SAVE_FUNCTION_NAME( Archive & ar, memory_detail::PtrWrapper<std::unique_ptr<T, D> const &> const & wrapper )
   {
     auto & ptr = wrapper.ptr;
+    uint32_t id;
+    bool needs_archiving = ar.registerUniquePointer(ptr.get(), id);
 
-    // unique_ptr get one byte of metadata which signifies whether they were a nullptr
-    // 0 == nullptr
-    // 1 == not null
+#if _DEBUG
+    ar.registerUniquePointerLink(ptr.get());
+#endif
 
-    if( !ptr )
-      ar( CEREAL_NVP_("valid", uint8_t(0)) );
-    else
-    {
-      ar( CEREAL_NVP_("valid", uint8_t(1)) );
+    ar( CEREAL_NVP_("id", id) );
+
+    if ( needs_archiving )
       ar( CEREAL_NVP_("data", *ptr) );
-    }
   }
 
   //! Loading std::unique_ptr, case when user provides load_and_construct (wrapper implementation)
@@ -368,30 +401,39 @@ namespace cereal
   typename std::enable_if<traits::has_load_and_construct<T, Archive>::value, void>::type
   CEREAL_LOAD_FUNCTION_NAME( Archive & ar, memory_detail::PtrWrapper<std::unique_ptr<T, D> &> & wrapper )
   {
-    uint8_t isValid;
-    ar( CEREAL_NVP_("valid", isValid) );
+    uint32_t id;
+    ar( CEREAL_NVP_("id", id) );
 
     auto & ptr = wrapper.ptr;
 
-    if( isValid )
+	if( id )
     {
-      using NonConstT = typename std::remove_const<T>::type;
-      // Storage type for the pointer - since we can't default construct this type,
-      // we'll allocate it using std::aligned_storage
-      using ST = typename std::aligned_storage<sizeof(NonConstT), CEREAL_ALIGNOF(NonConstT)>::type;
+      void* void_ptr = ar.getUniqueRawPointer(id);
 
-      // Allocate storage - note the ST type so that deleter is correct if
-      //                    an exception is thrown before we are initialized
-      std::unique_ptr<ST> stPtr( new ST() );
+      if ( void_ptr )
+      {
+      	ptr.reset(reinterpret_cast<T *>(void_ptr));
+      }
+	  else
+      {
+        using NonConstT = typename std::remove_const<T>::type;
+        // Storage type for the pointer - since we can't default construct this type,
+        // we'll allocate it using std::aligned_storage
+        using ST = typename std::aligned_storage<sizeof(NonConstT), CEREAL_ALIGNOF(NonConstT)>::type;
 
-      // Use wrapper to enter into "data" nvp of ptr_wrapper
-      memory_detail::LoadAndConstructLoadWrapper<Archive, NonConstT> loadWrapper( reinterpret_cast<NonConstT *>( stPtr.get() ) );
+        // Allocate storage - note the ST type so that deleter is correct if
+        //                    an exception is thrown before we are initialized
+        std::unique_ptr<ST> stPtr( new ST() );
 
-      // Initialize storage
-      ar( CEREAL_NVP_("data", loadWrapper) );
+        // Use wrapper to enter into "data" nvp of ptr_wrapper
+        memory_detail::LoadAndConstructLoadWrapper<Archive, NonConstT> loadWrapper( reinterpret_cast<NonConstT *>( stPtr.get() ) );
 
-      // Transfer ownership to correct unique_ptr type
-      ptr.reset( reinterpret_cast<T *>( stPtr.release() ) );
+        // Initialize storage
+        ar( CEREAL_NVP_("data", loadWrapper) );
+
+        // Transfer ownership to correct unique_ptr type
+        ptr.reset( reinterpret_cast<T *>( stPtr.release() ) );
+	  }
     }
     else
       ptr.reset( nullptr );
@@ -403,21 +445,84 @@ namespace cereal
   typename std::enable_if<!traits::has_load_and_construct<T, Archive>::value, void>::type
   CEREAL_LOAD_FUNCTION_NAME( Archive & ar, memory_detail::PtrWrapper<std::unique_ptr<T, D> &> & wrapper )
   {
-    uint8_t isValid;
-    ar( CEREAL_NVP_("valid", isValid) );
+    uint32_t id;
+    ar( CEREAL_NVP_("id", id) );
 
-    if( isValid )
+	if( id )
     {
-      using NonConstT = typename std::remove_const<T>::type;
-      std::unique_ptr<NonConstT, D> ptr( detail::Construct<NonConstT, Archive>::load_andor_construct() );
-      ar( CEREAL_NVP_( "data", *ptr ) );
-      wrapper.ptr = std::move(ptr);
+      void* void_ptr = ar.getUniqueRawPointer(id);
+
+      if ( void_ptr )
+      {
+      	wrapper.ptr.reset(reinterpret_cast<T *>(void_ptr));
+      }
+      else
+      {
+        using NonConstT = typename std::remove_const<T>::type;
+        std::unique_ptr<NonConstT, D> ptr( detail::Construct<NonConstT, Archive>::load_andor_construct() );
+		ar.registerUniquePointer(id, (void*)ptr.get());
+		ar( CEREAL_NVP_( "data", *ptr ) );
+        wrapper.ptr = std::move(ptr);
+      }
+
+#if _DEBUG
+      ar.registerUniquePointerLink(wrapper.ptr.get());
+#endif
     }
     else
     {
       wrapper.ptr.reset( nullptr );
     }
   }
+
+#if _DEBUG
+  //! Saving nonstd::observer_ptr (wrapper implementation)
+  /*! @internal */
+  template <class Archive, class T> inline
+  void CEREAL_SAVE_FUNCTION_NAME( Archive & ar, memory_detail::PtrWrapper<nonstd::observer_ptr<T> const &> const & wrapper )
+  {
+    auto & ptr = wrapper.ptr;
+	uint32_t id;
+
+    bool needs_archiving = ar.registerUniquePointer(ptr.get(), id);
+    ar( CEREAL_NVP_("id", id) );
+
+    if ( needs_archiving )
+      ar( CEREAL_NVP_("data", *ptr) );
+  }
+
+  //! Loading nonstd::observer_ptr, case when no load_and_construct (wrapper implementation)
+  /*! @internal */
+  template <class Archive, class T> inline
+  typename std::enable_if<!traits::has_load_and_construct<T, Archive>::value, void>::type
+  CEREAL_LOAD_FUNCTION_NAME( Archive & ar, memory_detail::PtrWrapper<nonstd::observer_ptr<T> &> & wrapper )
+  {
+    uint32_t id;
+    ar( CEREAL_NVP_("id", id) );
+
+    if( id )
+    {
+      void* void_ptr = ar.getUniqueRawPointer(id);
+
+      if ( void_ptr )
+      {
+        wrapper.ptr.reset(reinterpret_cast<T *>(void_ptr));
+      }
+      else
+      {
+        using NonConstT = typename std::remove_const<T>::type;
+        std::unique_ptr<NonConstT, nop> ptr(detail::Construct<NonConstT, Archive>::load_andor_construct());
+		ar.registerUniquePointer(id, (void*)ptr.get());
+		ar( CEREAL_NVP_("data", *ptr) );
+        wrapper.ptr.reset( ptr.get() );
+      }
+    }
+    else
+    {
+      wrapper.ptr.reset( nullptr );
+    }
+  }
+#endif
 } // namespace cereal
 
 // automatically include polymorphic support

@@ -44,6 +44,7 @@
 #include "cereal/details/traits.hpp"
 #include "cereal/details/helpers.hpp"
 #include "cereal/types/base_class.hpp"
+#include "cereal/observer_ptr.h"
 
 namespace cereal
 {
@@ -258,6 +259,16 @@ namespace cereal
       OutputArchive(ArchiveType * const derived) : self(derived), itsCurrentPointerId(1), itsCurrentPolymorphicTypeId(1)
       { }
 
+#if _DEBUG
+      //! Destruct the output archive
+      //! Only used in debugging to track issues with unique to observer pointer links
+      virtual ~OutputArchive()
+      {
+        for (const auto& pair : itsUniquePointerMap)
+          assert(isItsUniquePointers.find(pair.first) != isItsUniquePointers.cend());
+      }
+#endif
+
       OutputArchive & operator=( OutputArchive const & ) = delete;
 
       //! Serializes all passed in data
@@ -335,6 +346,46 @@ namespace cereal
         else
           return id->second;
       }
+
+      //! Registers a unique pointer with the archive
+      /*! This function is used to track unique pointer targets to prevent
+          unnecessary saves from taking place if multiple observer pointers
+          point to the same data.
+
+          @internal
+          @param addr The address (see unique_ptr get()) pointed to by the unique pointer
+          @param id A key that uniquely identifies the pointer
+          @return true if a new pointer was added to the map */
+      inline bool registerUniquePointer(void const * addr, std::uint32_t& id)
+      {
+        // Handle null pointers by just returning 0
+        if ( addr == 0 )
+        {
+          id = 0;
+          return false;
+        }
+
+        auto cur_id = itsUniquePointerMap.find(addr);
+        if (cur_id == itsUniquePointerMap.end())
+        {
+          auto ptrId = itsCurrentPointerId++;
+          itsUniquePointerMap.insert({ addr, ptrId });
+          id = ptrId;
+          return true;
+        }
+        else
+        {
+          id = cur_id->second;
+          return false;
+        }
+      }
+
+#if _DEBUG
+      inline void registerUniquePointerLink(void const * addr)
+      {
+        isItsUniquePointers.insert(addr);
+      }
+#endif
 
       //! Registers a polymorphic type name with the archive
       /*! This function is used to track polymorphic types to prevent
@@ -600,6 +651,12 @@ namespace cereal
       //! Maps from addresses to pointer ids
       std::unordered_map<void const *, std::uint32_t> itsSharedPointerMap;
 
+      //! Maps from addresses to pointer ids
+      std::unordered_map<void const *, std::uint32_t> itsUniquePointerMap;
+#if _DEBUG
+      std::unordered_set<void const *> isItsUniquePointers;
+#endif
+
       //! The id to be given to the next pointer
       std::uint32_t itsCurrentPointerId;
 
@@ -643,6 +700,14 @@ namespace cereal
         itsPolymorphicTypeMap(),
         itsVersionedTypes()
       { }
+
+#if _DEBUG
+      virtual ~InputArchive()
+      {
+        for (const auto& pair : itsUniquePointerMap)
+          assert(isItsUniquePointers.find(pair.second) != isItsUniquePointers.cend());
+      }
+#endif
 
       InputArchive & operator=( InputArchive const & ) = delete;
 
@@ -716,6 +781,23 @@ namespace cereal
         return iter->second;
       }
 
+      //! Retrieves a raw pointer given a unique key for it
+      /*! This is used to retrieve a previously registered unique_ptr
+          which has already been loaded.
+
+          @param id The unique id that was serialized for the pointer
+          @return A raw pointer to the data or nullptr if it does not exist */
+      inline void* getUniqueRawPointer(std::uint32_t const id)
+      {
+        if (id == 0) return nullptr;
+
+        auto iter = itsUniquePointerMap.find(id);
+        if(iter == itsUniquePointerMap.end())
+          return nullptr;
+
+        return iter->second;
+      }
+
       //! Registers a shared pointer to its unique identifier
       /*! After a shared pointer has been allocated for the first time, it should
           be registered with its loaded id for future references to it.
@@ -727,6 +809,24 @@ namespace cereal
         std::uint32_t const stripped_id = id & ~detail::msb_32bit;
         itsSharedPointerMap[stripped_id] = ptr;
       }
+
+      //! Registers a unique pointer to its unique identifier
+      /*! After a unique pointer has been allocated for the first time, it should
+          be registered with its loaded id for future references to it.
+
+          @param id The unique identifier for the unique pointer
+          @param ptr The actual raw pointer of the unique_ptr */
+      inline void registerUniquePointer(std::uint32_t& id, void* ptr)
+      {
+        itsUniquePointerMap[id] = ptr;
+      }
+
+#if _DEBUG
+      inline void registerUniquePointerLink(void const * addr)
+      {
+        isItsUniquePointers.insert(addr);
+      }
+#endif
 
       //! Retrieves the string for a polymorphic type given a unique key for it
       /*! This is used to retrieve a string previously registered during
@@ -1023,6 +1123,12 @@ namespace cereal
 
       //! Maps from pointer ids to metadata
       std::unordered_map<std::uint32_t, std::shared_ptr<void>> itsSharedPointerMap;
+
+	  //! Maps from pointer ids to metadata
+      std::unordered_map<std::uint32_t, void*> itsUniquePointerMap;
+#if _DEBUG
+      std::unordered_set<void const *> isItsUniquePointers;
+#endif
 
       //! Maps from name ids to names
       std::unordered_map<std::uint32_t, std::string> itsPolymorphicTypeMap;

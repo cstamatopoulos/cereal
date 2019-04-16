@@ -69,4 +69,9 @@ TEST_CASE("json_default_construction")
   test_default_construction<cereal::JSONInputArchive, cereal::JSONOutputArchive>();
 }
 
+TEST_CASE("json_default_construction")
+{
+  test_default_construction2<cereal::JSONInputArchive, cereal::JSONOutputArchive>();
+}
+
 TEST_SUITE_END();
